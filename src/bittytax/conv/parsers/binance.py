@@ -357,7 +357,10 @@ def parse_binance_statements(
     tx_times: Dict[datetime, List["DataRow"]] = {}
 
     for dr in data_rows:
-        dr.timestamp = DataParser.parse_timestamp(dr.row_dict["UTC_Time"])
+        # Binance statement exports use an ambiguous YY-MM-DD UTC_Time (e.g. "25-01-19").
+        # dateutil defaults to month/day-first and misreads it (25 -> day, 19 -> year 2019),
+        # which corrupts both the dates and the chronological ordering. Force year-first.
+        dr.timestamp = DataParser.parse_timestamp(dr.row_dict["UTC_Time"], yearfirst=True)
         if dr.timestamp in tx_times:
             tx_times[dr.timestamp].append(dr)
         else:
@@ -645,10 +648,15 @@ def _parse_binance_statements_row(
             if sell_rows:
                 _make_trade(op_rows)
             elif buy_rows:
-                # Binance n'exporte pas le débit fiat — on enregistre l'acquisition au prix de marché
+                # Binance n'exporte pas le débit fiat de "Buy Crypto With Fiat" — il n'y a que la
+                # jambe crypto. On l'enregistre comme acquisition valorisée au prix de marché du
+                # jour (Gift-Received) plutôt qu'en Deposit (transfert à coût nul, qui
+                # sous-estimerait le prix d'acquisition et polluerait le contrôle de transferts).
+                # Un "Trade" mono-jambe est refusé par BittyTax (jambe de vente manquante) ;
+                # Gift-Received entre dans le prix d'acquisition sans être imposé comme revenu.
                 buy_row = buy_rows[0]
                 buy_row.t_record = TransactionOutRecord(
-                    TrType.DEPOSIT,
+                    TrType.GIFT_RECEIVED,
                     buy_row.timestamp,
                     buy_quantity=Decimal(buy_row.row_dict["Change"]),
                     buy_asset=buy_row.row_dict["Coin"],

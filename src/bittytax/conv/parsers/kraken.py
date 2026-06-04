@@ -68,6 +68,7 @@ QUOTE_ASSETS = [
 ]
 
 ALT_ASSETS = {
+    "NANO": "XNO",  # Nano was renamed XNO in 2021; Binance uses XNO, Kraken still NANO
     "XETC": "ETC",
     "XETH": "ETH",
     "XLTC": "LTC",

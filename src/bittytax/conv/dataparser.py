@@ -154,13 +154,14 @@ class DataParser:  # pylint: disable=too-many-instance-attributes
         tzinfos: Optional[Dict[str, Optional[tzinfo]]] = None,
         tz: Optional[str] = None,
         dayfirst: bool = False,
+        yearfirst: bool = False,
         fuzzy: bool = False,
     ) -> datetime:
         if isinstance(timestamp_str, (int, float)):
             timestamp = datetime.fromtimestamp(timestamp_str, TZ_UTC)
         else:
             timestamp = dateutil.parser.parse(
-                timestamp_str, tzinfos=tzinfos, dayfirst=dayfirst, fuzzy=fuzzy
+                timestamp_str, tzinfos=tzinfos, dayfirst=dayfirst, yearfirst=yearfirst, fuzzy=fuzzy
             )
 
         if tz:
