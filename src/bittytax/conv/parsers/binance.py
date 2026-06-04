@@ -31,16 +31,34 @@ PRECISION = Decimal("0." + "0" * 8)
 
 WALLET = "Binance"
 
-# Frais de retrait réseau par asset. Un Withdraw Binance dont le Remark vaut
-# "Withdraw fee is included" débite un Change qui INCLUT déjà le frais réseau, mais Binance
-# n'exporte pas le montant du frais sur la ligne. On le déduit ici depuis cette table : le frais
-# est isolé en colonne Fee et retranché du sell_quantity (montant réellement transféré), pour que
-# le contrôle de transferts BittyTax équilibre (sortie = montant reçu côté plateforme destinataire)
-# tout en enregistrant le frais comme dépense. Valeurs = frais de retrait standard Binance.
-# Ajouter un asset ici quand un nouveau retrait "fee is included" apparaît dans l'audit.
-WITHDRAW_NETWORK_FEE = {
-    "USDT": Decimal("1"),
-}
+def _load_withdraw_network_fees() -> Dict[str, Decimal]:
+    # Frais de retrait réseau, par retrait individuel, chargés depuis un CSV pointé par
+    # BINANCE_WITHDRAW_FEES_FILE (colonnes : Key, Fee, Note). Un Withdraw Binance dont le
+    # Remark vaut "Withdraw fee is included" débite un Change qui INCLUT déjà le frais réseau,
+    # mais Binance n'exporte pas le montant du frais sur la ligne. Comme un statement n'a pas de
+    # txid, chaque retrait est identifié par la clé composite UTC_Time|Coin|Change (même clé
+    # qu'ADR 0007). Le frais y est isolé en colonne Fee et retranché du sell_quantity (montant
+    # réellement transféré) pour que le contrôle de transferts BittyTax équilibre (sortie =
+    # montant reçu côté destination) tout en enregistrant le frais comme dépense.
+    # Le frais n'est PAS calculable depuis le seul Change : il est mesuré une fois comme
+    # |Change Binance| − montant crédité côté destination, puis figé dans le CSV (pas de couplage
+    # cross-fichiers, pas d'appariement heuristique). Ajouter une ligne quand un nouveau retrait
+    # "fee is included" laisse un mismatch à l'audit. Cf. docs/adr/0008 et
+    # datas/binance_withdraw_fees.csv.
+    path = os.environ.get("BINANCE_WITHDRAW_FEES_FILE", "")
+    fees: Dict[str, Decimal] = {}
+    if not path or not os.path.exists(path):
+        return fees
+    with open(path, newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            key = (row.get("Key") or "").strip()
+            fee = (row.get("Fee") or "").strip()
+            if key and fee:
+                fees[key] = Decimal(fee)
+    return fees
+
+
+WITHDRAW_NETWORK_FEE = _load_withdraw_network_fees()
 
 
 def _load_binance_override_keys() -> Set[str]:
@@ -681,11 +699,15 @@ def _parse_binance_statements_row(
             fee_quantity = None
             fee_asset = ""
             # "Withdraw fee is included" : le Change inclut le frais réseau que Binance n'exporte
-            # pas. On l'isole depuis WITHDRAW_NETWORK_FEE et on réduit le sell_quantity au montant
-            # réellement transféré, sinon BittyTax compte sortie = Change > montant reçu et signale
-            # un transfers mismatch (le frais "disparaît"). Cf. WITHDRAW_NETWORK_FEE.
+            # pas. On l'isole depuis WITHDRAW_NETWORK_FEE (indexé sur la clé composite
+            # UTC_Time|Coin|Change, un frais par retrait individuel) et on réduit le sell_quantity
+            # au montant réellement transféré, sinon BittyTax compte sortie = Change > montant reçu
+            # et signale un transfers mismatch (le frais "disparaît"). Cf. WITHDRAW_NETWORK_FEE.
             if "fee is included" in row_dict["Remark"].lower():
-                network_fee = WITHDRAW_NETWORK_FEE.get(row_dict["Coin"])
+                fee_key = "|".join(
+                    (row_dict["UTC_Time"], row_dict["Coin"], row_dict["Change"])
+                )
+                network_fee = WITHDRAW_NETWORK_FEE.get(fee_key)
                 if network_fee is not None and network_fee < sell_quantity:
                     sell_quantity -= network_fee
                     fee_quantity = network_fee
