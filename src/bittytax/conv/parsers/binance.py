@@ -31,34 +31,61 @@ PRECISION = Decimal("0." + "0" * 8)
 
 WALLET = "Binance"
 
-def _load_withdraw_network_fees() -> Dict[str, Decimal]:
-    # Frais de retrait réseau, par retrait individuel, chargés depuis un CSV pointé par
-    # BINANCE_WITHDRAW_FEES_FILE (colonnes : Key, Fee, Note). Un Withdraw Binance dont le
-    # Remark vaut "Withdraw fee is included" débite un Change qui INCLUT déjà le frais réseau,
-    # mais Binance n'exporte pas le montant du frais sur la ligne. Comme un statement n'a pas de
-    # txid, chaque retrait est identifié par la clé composite UTC_Time|Coin|Change (même clé
-    # qu'ADR 0007). Le frais y est isolé en colonne Fee et retranché du sell_quantity (montant
-    # réellement transféré) pour que le contrôle de transferts BittyTax équilibre (sortie =
+def _load_withdraw_history_fees() -> Dict[Tuple[str, Decimal], Decimal]:
+    # Frais réseau RÉELS des retraits Binance, lus depuis l'export officiel "Withdrawal History"
+    # (colonnes Time,Coin,Network,Amount,Fee,Address,TXID,Status) pointé par la variable
+    # d'environnement BINANCE_WITHDRAW_HISTORY_FILE. C'est la source de vérité : Amount = montant
+    # NET transféré, Fee = frais réseau réel, et Amount + Fee == |Change| de la ligne de statement.
+    #
+    # Un Withdraw du statement dont le Remark vaut "Withdraw fee is included" débite un Change qui
+    # INCLUT le frais, mais ne donne pas son montant ; on l'isole ici puis on le retranche du
+    # sell_quantity (= Amount) pour que le contrôle de transferts BittyTax équilibre (sortie =
     # montant reçu côté destination) tout en enregistrant le frais comme dépense.
-    # Le frais n'est PAS calculable depuis le seul Change : il est mesuré une fois comme
-    # |Change Binance| − montant crédité côté destination, puis figé dans le CSV (pas de couplage
-    # cross-fichiers, pas d'appariement heuristique). Ajouter une ligne quand un nouveau retrait
-    # "fee is included" laisse un mismatch à l'audit. Cf. docs/adr/0008 et
-    # datas/binance_withdraw_fees.csv.
-    path = os.environ.get("BINANCE_WITHDRAW_FEES_FILE", "")
-    fees: Dict[str, Decimal] = {}
+    #
+    # Clé d'appariement statement <-> withdraw-history = (Coin, Amount+Fee) = (Coin, |Change|),
+    # vérifiée UNIQUE sur l'export. On n'apparie PAS par horodatage : le Time du withdraw-history
+    # diffère du UTC_Time du statement (fuseau / délai de traitement). Cf. docs/adr/0008 et
+    # datas/wallets/Binance-Withdraw-History-*.csv.
+    path = os.environ.get("BINANCE_WITHDRAW_HISTORY_FILE", "")
+    fees: Dict[Tuple[str, Decimal], Decimal] = {}
     if not path or not os.path.exists(path):
         return fees
-    with open(path, newline="", encoding="utf-8") as f:
+    with open(path, newline="", encoding="utf-8-sig") as f:
         for row in csv.DictReader(f):
-            key = (row.get("Key") or "").strip()
+            coin = (row.get("Coin") or "").strip()
+            amount = (row.get("Amount") or "").strip()
             fee = (row.get("Fee") or "").strip()
-            if key and fee:
-                fees[key] = Decimal(fee)
+            if coin and amount and fee:
+                fees[(coin, Decimal(amount) + Decimal(fee))] = Decimal(fee)
     return fees
 
 
-WITHDRAW_NETWORK_FEE = _load_withdraw_network_fees()
+def _load_gas_hors_perimetre() -> Dict[Tuple[str, Decimal], Decimal]:
+    # Frais réseau (gas) DÉRIVÉS, dépensés HORS des wallets tracés, à porter en Fee ADDITIONNELLE
+    # sur un retrait Binance. Chargés depuis le CSV pointé par BINANCE_GAS_OVERRIDES_FILE
+    # (colonnes Coin,Change,GasExtra,Note), indexés sur (Coin, |Change|) comme la table des frais
+    # de retrait. Distinct de la fee officielle du Withdrawal History : ce montant n'est PAS dans
+    # un export Binance, il est mesuré on-chain (gas consommé sur des wallets intermédiaires non
+    # suivis). On l'AJOUTE à la fee du retrait pour que (a) le solde reste exact et (b) le contrôle
+    # de transferts équilibre (le gas qui n'est jamais "revenu" est isolé de la quantité transférée).
+    # Fiscalement : frais réseau = non-cession (ni PV ni MV). Cf. docs/adr/0010 et
+    # datas/overrides/binance_gas_hors_perimetre.csv.
+    path = os.environ.get("BINANCE_GAS_OVERRIDES_FILE", "")
+    gas: Dict[Tuple[str, Decimal], Decimal] = {}
+    if not path or not os.path.exists(path):
+        return gas
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        for row in csv.DictReader(f):
+            coin = (row.get("Coin") or "").strip()
+            change = (row.get("Change") or "").strip()
+            extra = (row.get("GasExtra") or "").strip()
+            if coin and change and extra:
+                gas[(coin, abs(Decimal(change)))] = Decimal(extra)
+    return gas
+
+
+WITHDRAW_NETWORK_FEE = _load_withdraw_history_fees()
+GAS_HORS_PERIMETRE = _load_gas_hors_perimetre()
 
 
 def _load_binance_override_keys() -> Set[str]:
@@ -699,19 +726,27 @@ def _parse_binance_statements_row(
             fee_quantity = None
             fee_asset = ""
             # "Withdraw fee is included" : le Change inclut le frais réseau que Binance n'exporte
-            # pas. On l'isole depuis WITHDRAW_NETWORK_FEE (indexé sur la clé composite
-            # UTC_Time|Coin|Change, un frais par retrait individuel) et on réduit le sell_quantity
-            # au montant réellement transféré, sinon BittyTax compte sortie = Change > montant reçu
-            # et signale un transfers mismatch (le frais "disparaît"). Cf. WITHDRAW_NETWORK_FEE.
+            # pas. On l'isole depuis WITHDRAW_NETWORK_FEE (frais réel issu du Withdrawal History,
+            # indexé sur (Coin, |Change|)) et on réduit le sell_quantity au montant réellement
+            # transféré, sinon BittyTax compte sortie = Change > montant reçu et signale un
+            # transfers mismatch (le frais "disparaît"). Cf. WITHDRAW_NETWORK_FEE.
             if "fee is included" in row_dict["Remark"].lower():
-                fee_key = "|".join(
-                    (row_dict["UTC_Time"], row_dict["Coin"], row_dict["Change"])
-                )
+                fee_key = (row_dict["Coin"], abs(Decimal(row_dict["Change"])))
                 network_fee = WITHDRAW_NETWORK_FEE.get(fee_key)
                 if network_fee is not None and network_fee < sell_quantity:
                     sell_quantity -= network_fee
                     fee_quantity = network_fee
                     fee_asset = row_dict["Coin"]
+            # Gas réseau DÉRIVÉ dépensé hors des wallets tracés (mesuré on-chain), porté en Fee
+            # ADDITIONNELLE sur ce retrait pour que le solde reste exact et que le contrôle de
+            # transferts équilibre (le gas n'est jamais "revenu"). Cf. GAS_HORS_PERIMETRE, ADR 0010.
+            gas_extra = GAS_HORS_PERIMETRE.get(
+                (row_dict["Coin"], abs(Decimal(row_dict["Change"])))
+            )
+            if gas_extra is not None and gas_extra < sell_quantity:
+                sell_quantity -= gas_extra
+                fee_quantity = (fee_quantity or Decimal(0)) + gas_extra
+                fee_asset = row_dict["Coin"]
             data_row.t_record = TransactionOutRecord(
                 TrType.WITHDRAWAL,
                 data_row.timestamp,
