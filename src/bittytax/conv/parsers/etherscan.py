@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
 # (c) Nano Nano Ltd 2019
 
+import csv
+import os
 import re
 import sys
 from decimal import Decimal
-from typing import TYPE_CHECKING, Dict, List
+from typing import TYPE_CHECKING, Dict, List, Set
 
 from colorama import Fore
 from typing_extensions import Unpack
@@ -21,13 +23,42 @@ if TYPE_CHECKING:
     from ..datarow import DataRow
 
 
+def _load_evm_override_txids() -> Set[str]:
+    # Txids of EVM transactions requalified manually via a BittyTax-format CSV imported
+    # alongside the explorer exports (pointed to by EVM_OVERRIDES_FILE). The explorer export
+    # only carries the native leg of a DEX swap (e.g. "Swap Exact ETH For Tokens" on BNB Chain
+    # exports only the BNB leg), so it parses as an orphan Withdrawal. The override CSV provides
+    # the full Trade (sell native / buy token); we skip these txids here to avoid double-counting
+    # the native leg. See docs/adr/0006 and datas/evm_overrides.csv.
+    path = os.environ.get("EVM_OVERRIDES_FILE", "")
+    txids: Set[str] = set()
+    if not path or not os.path.exists(path):
+        return txids
+    with open(path, newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            txid = (row.get("Tx ID") or "").strip().lower()
+            if txid:
+                txids.add(txid)
+    return txids
+
+
+EVM_OVERRIDE_TXIDS = _load_evm_override_txids()
+
+
 def parse_etherscan(data_row: "DataRow", parser: DataParser, **_kwargs: Unpack[ParserArgs]) -> None:
     row_dict = data_row.row_dict
     data_row.timestamp = DataParser.parse_timestamp(int(row_dict["UnixTimestamp"]))
     if "Txhash" in row_dict:
         tx_hash_pos = parser.in_header.index("Txhash")
+        tx_hash = row_dict["Txhash"]
     else:
         tx_hash_pos = parser.in_header.index("Transaction Hash")
+        tx_hash = row_dict["Transaction Hash"]
+
+    # Native-leg row of a swap requalified via EVM_OVERRIDES_FILE: skip it so the imported
+    # override CSV provides the full Trade without double-counting the native leg.
+    if tx_hash.strip().lower() in EVM_OVERRIDE_TXIDS:
+        return
 
     data_row.tx_raw = TxRawPos(
         tx_hash_pos,

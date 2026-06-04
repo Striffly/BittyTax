@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
 # (c) Nano Nano Ltd 2019
 
+import csv
+import os
 import re
 import sys
 from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 
 from colorama import Fore
 from typing_extensions import Unpack
@@ -28,6 +30,30 @@ if TYPE_CHECKING:
 PRECISION = Decimal("0." + "0" * 8)
 
 WALLET = "Binance"
+
+
+def _load_binance_override_keys() -> Set[str]:
+    # Binance statement rows requalified manually via a BittyTax-format CSV imported alongside
+    # the Binance export (pointed to by BINANCE_OVERRIDES_FILE). A statement export carries no
+    # txid, so a row is identified by the composite key UTC_Time|Coin|Change. Use case: a USDT
+    # "Deposit" that is actually a gift received from a third party (acquisition à titre gratuit)
+    # and must be requalified as Gift-Received — the default Deposit would otherwise be read as an
+    # internal transfer (INTRA) with no acquisition cost. The override CSV provides the
+    # Gift-Received line; we skip the matching statement row here to avoid double-counting.
+    # See docs/adr/0007 and datas/binance_overrides.csv.
+    path = os.environ.get("BINANCE_OVERRIDES_FILE", "")
+    keys: Set[str] = set()
+    if not path or not os.path.exists(path):
+        return keys
+    with open(path, newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            key = (row.get("Raw Data") or "").strip()
+            if key:
+                keys.add(key)
+    return keys
+
+
+BINANCE_OVERRIDE_KEYS = _load_binance_override_keys()
 
 QUOTE_ASSETS = [
     "AEUR",
@@ -394,6 +420,16 @@ def _parse_binance_statements_row(
     tx_times: Dict[datetime, List["DataRow"]], parser: DataParser, data_row: "DataRow"
 ) -> None:
     row_dict = data_row.row_dict
+
+    # Row requalified via BINANCE_OVERRIDES_FILE (e.g. a Deposit that is actually a third-party
+    # gift): skip it so the imported override CSV provides the Gift-Received line without
+    # double-counting. The composite key UTC_Time|Coin|Change stands in for the absent txid.
+    if BINANCE_OVERRIDE_KEYS:
+        override_key = "|".join(
+            (row_dict["UTC_Time"], row_dict["Coin"], row_dict["Change"])
+        )
+        if override_key in BINANCE_OVERRIDE_KEYS:
+            return
 
     if row_dict["Account"] in ("USDT-Futures", "USD-MFutures", "USD-M Futures", "Coin-M Futures"):
         _parse_binance_statements_futures_row(tx_times, parser, data_row)
