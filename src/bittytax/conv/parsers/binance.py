@@ -661,6 +661,7 @@ def _parse_binance_statements_row(
                     buy_quantity=Decimal(buy_row.row_dict["Change"]),
                     buy_asset=buy_row.row_dict["Coin"],
                     wallet=WALLET,
+                    note="Achat fiat Binance, jambe EUR non exportee - acquisition au prix marche",
                 )
                 buy_row.parsed = True
         else:
