@@ -52,6 +52,13 @@ class TrType(Enum):
     MARGIN_LOSS = "Margin-Loss"
     MARGIN_FEE = "Margin-Fee"
     TRADE = "Trade"
+    # Standalone network/platform fee (fork-local addition). The fee asset is the
+    # only thing leaving the wallet (carried by Fee Quantity/Asset, no buy/sell leg),
+    # so it is intentionally absent from BUY_TYPES/SELL_TYPES: at --audit it only
+    # decrements the balance via tr.fee, and is marked non-disposal in t_row.parse().
+    # Used for fee-only Solana txs (SPL account init, compressed-NFT mint, etc.);
+    # aligned with BOFiP BOI-RPPM-PVBMC-30-20 §50 (fees are not a separate cession).
+    FEE = "Fee"
 
 
 class DisposalType(Enum):

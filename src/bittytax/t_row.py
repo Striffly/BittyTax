@@ -417,6 +417,23 @@ class TransactionRow:
             fee_asset=FieldRequired.OPTIONAL,
             fee_value=FieldRequired.OPTIONAL,
         ),
+        # Standalone network/platform fee (no asset bought or sold). The fee asset
+        # is the only thing leaving the wallet. Not an acquisition nor a disposal,
+        # so it never creates a UK gain — it just decrements the balance at audit.
+        # Used for fee-only Solana txs (SPL account init, compressed-NFT mint, etc.);
+        # aligned with BOFiP BOI-RPPM-PVBMC-30-20 §50 (fees are not a separate cession).
+        TrType.FEE: FieldValidation(
+            t_type=FieldRequired.MANDATORY,
+            buy_quantity=FieldRequired.NOT_REQUIRED,
+            buy_asset=FieldRequired.NOT_REQUIRED,
+            buy_value=FieldRequired.NOT_REQUIRED,
+            sell_quantity=FieldRequired.NOT_REQUIRED,
+            sell_asset=FieldRequired.NOT_REQUIRED,
+            sell_value=FieldRequired.NOT_REQUIRED,
+            fee_quantity=FieldRequired.MANDATORY,
+            fee_asset=FieldRequired.MANDATORY,
+            fee_value=FieldRequired.OPTIONAL,
+        ),
     }
 
     def __init__(
@@ -527,6 +544,11 @@ class TransactionRow:
                     # Not a disposal (unless configured otherwise)
                     if not config.transfer_fee_disposal:
                         fee.disposal = False
+            elif t_type is TrType.FEE:
+                # Standalone fee: the fee asset is the only thing leaving the wallet
+                # and it is not a disposal (BOFiP simplification — fees are not a
+                # separate taxable cession).
+                fee.disposal = False
 
         self.t_record = TransactionRecord(
             t_type,
