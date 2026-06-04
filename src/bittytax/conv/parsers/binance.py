@@ -637,6 +637,27 @@ def _parse_binance_statements_row(
         else:
             # Skip duplicate operations
             return
+    elif row_dict["Operation"] == "Buy Crypto With Fiat":
+        if config.binance_statements_only:
+            op_rows = _get_op_rows(tx_times, data_row.timestamp, (row_dict["Operation"],))
+            buy_rows = [r for r in op_rows if Decimal(r.row_dict["Change"]) > 0]
+            sell_rows = [r for r in op_rows if Decimal(r.row_dict["Change"]) < 0]
+            if sell_rows:
+                _make_trade(op_rows)
+            elif buy_rows:
+                # Binance n'exporte pas le débit fiat — on enregistre l'acquisition au prix de marché
+                buy_row = buy_rows[0]
+                buy_row.t_record = TransactionOutRecord(
+                    TrType.DEPOSIT,
+                    buy_row.timestamp,
+                    buy_quantity=Decimal(buy_row.row_dict["Change"]),
+                    buy_asset=buy_row.row_dict["Coin"],
+                    wallet=WALLET,
+                )
+                buy_row.parsed = True
+        else:
+            # Skip duplicate operations
+            return
     elif row_dict["Operation"] in ("Binance Convert", "Large OTC trading", "Buy Crypto With Card"):
         if config.binance_statements_only:
             _make_trade(
