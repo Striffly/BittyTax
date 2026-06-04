@@ -31,6 +31,17 @@ PRECISION = Decimal("0." + "0" * 8)
 
 WALLET = "Binance"
 
+# Frais de retrait réseau par asset. Un Withdraw Binance dont le Remark vaut
+# "Withdraw fee is included" débite un Change qui INCLUT déjà le frais réseau, mais Binance
+# n'exporte pas le montant du frais sur la ligne. On le déduit ici depuis cette table : le frais
+# est isolé en colonne Fee et retranché du sell_quantity (montant réellement transféré), pour que
+# le contrôle de transferts BittyTax équilibre (sortie = montant reçu côté plateforme destinataire)
+# tout en enregistrant le frais comme dépense. Valeurs = frais de retrait standard Binance.
+# Ajouter un asset ici quand un nouveau retrait "fee is included" apparaît dans l'audit.
+WITHDRAW_NETWORK_FEE = {
+    "USDT": Decimal("1"),
+}
+
 
 def _load_binance_override_keys() -> Set[str]:
     # Binance statement rows requalified manually via a BittyTax-format CSV imported alongside
@@ -666,11 +677,26 @@ def _parse_binance_statements_row(
             return
     elif row_dict["Operation"] in ("Withdraw", "Fiat Withdraw", "Fiat Withdrawal", "Send"):
         if config.binance_statements_only:
+            sell_quantity = abs(Decimal(row_dict["Change"]))
+            fee_quantity = None
+            fee_asset = ""
+            # "Withdraw fee is included" : le Change inclut le frais réseau que Binance n'exporte
+            # pas. On l'isole depuis WITHDRAW_NETWORK_FEE et on réduit le sell_quantity au montant
+            # réellement transféré, sinon BittyTax compte sortie = Change > montant reçu et signale
+            # un transfers mismatch (le frais "disparaît"). Cf. WITHDRAW_NETWORK_FEE.
+            if "fee is included" in row_dict["Remark"].lower():
+                network_fee = WITHDRAW_NETWORK_FEE.get(row_dict["Coin"])
+                if network_fee is not None and network_fee < sell_quantity:
+                    sell_quantity -= network_fee
+                    fee_quantity = network_fee
+                    fee_asset = row_dict["Coin"]
             data_row.t_record = TransactionOutRecord(
                 TrType.WITHDRAWAL,
                 data_row.timestamp,
-                sell_quantity=abs(Decimal(row_dict["Change"])),
+                sell_quantity=sell_quantity,
                 sell_asset=row_dict["Coin"],
+                fee_quantity=fee_quantity,
+                fee_asset=fee_asset,
                 wallet=WALLET,
             )
         else:
