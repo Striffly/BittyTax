@@ -102,10 +102,22 @@ def _load_binance_override_keys() -> Set[str]:
     if not path or not os.path.exists(path):
         return keys
     with open(path, newline="", encoding="utf-8") as f:
-        for row in csv.DictReader(f):
+        for line_no, row in enumerate(csv.DictReader(f), start=2):
+            # Garde anti-décalage silencieux : chaque ligne d'override DOIT porter sa clé
+            # composite UTC_Time|Coin|Change en dernière colonne (Raw Data). Une cellule Note
+            # contenant une virgule NON quotée décale tout d'une colonne et vide Raw Data — le
+            # skip du Deposit d'origine ne s'arme alors plus et l'audit signale un transfers
+            # mismatch sans cause apparente (cf. ADR 0007). On échoue bruyamment plutôt que de
+            # laisser passer une clé vide. Fix : quoter la cellule Note dans le CSV.
             key = (row.get("Raw Data") or "").strip()
-            if key:
-                keys.add(key)
+            if not key:
+                raise RuntimeError(
+                    f"{path}: ligne {line_no}: colonne 'Raw Data' vide "
+                    f"(clé d'override manquante). Cause probable : une virgule non quotée "
+                    f"dans la colonne 'Note' a décalé les colonnes. Quoter la cellule 'Note'. "
+                    f"Ligne lue : {row}"
+                )
+            keys.add(key)
     return keys
 
 
