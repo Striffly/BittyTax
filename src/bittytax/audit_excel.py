@@ -55,9 +55,14 @@ class AuditLogExcel:  # pylint: disable=too-few-public-methods, too-many-instanc
 
     TITLE = "BittyTax Audit"
 
-    def __init__(self, progname: str, audit_log: Dict[AssetSymbol, List[AuditLogEntry]]) -> None:
+    def __init__(
+        self,
+        progname: str,
+        audit_log: Dict[AssetSymbol, List[AuditLogEntry]],
+        output_filename: Optional[str] = None,
+    ) -> None:
         self.audit_log = audit_log
-        self.filename = self._get_output_filename()
+        self.filename = self._get_output_filename(output_filename)
         self.workbook = xlsxwriter.Workbook(self.filename)
         self.workbook.set_size(1800, 1200)
         self.workbook.formats[0].set_font_size(FONT_SIZE)
@@ -135,7 +140,18 @@ class AuditLogExcel:  # pylint: disable=too-few-public-methods, too-many-instanc
             {"font_size": FONT_SIZE, "font_color": self.FONT_COLOR_GREY, "align": "right"}
         )
 
-    def _get_output_filename(self) -> str:
+    def _get_output_filename(self, output_filename: Optional[str] = None) -> str:
+        if output_filename:
+            # Honour the user-supplied name/path verbatim (add extension if missing,
+            # create parent dir if needed), without the auto-increment fallback below.
+            filepath = output_filename
+            if not filepath.endswith("." + self.FILE_EXTENSION):
+                filepath += "." + self.FILE_EXTENSION
+            dirname = os.path.dirname(filepath)
+            if dirname:
+                os.makedirs(dirname, exist_ok=True)
+            return filepath
+
         filepath = self.DEFAULT_FILENAME + "." + self.FILE_EXTENSION
 
         if not os.path.exists(filepath):

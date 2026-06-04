@@ -108,6 +108,12 @@ def _create_arg_parser(version_str: str) -> argparse.ArgumentParser:
         help="don't output PDF report, output report to terminal only",
     )
     parser.add_argument(
+        "--audit-output",
+        dest="audit_output_filename",
+        type=str,
+        help="specify the output filename (or path) for the audit log Excel file",
+    )
+    parser.add_argument(
         "--export",
         action="store_true",
         help="populate transaction records with price data in CSV format",
@@ -159,7 +165,9 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
 
     if args.audit_only:
         if audit.audit_log:
-            audit_log_excel = AuditLogExcel(parser.prog, audit.audit_log)
+            audit_log_excel = AuditLogExcel(
+                parser.prog, audit.audit_log, args.audit_output_filename
+            )
             audit_log_excel.write_excel()
 
         if args.nopdf:
