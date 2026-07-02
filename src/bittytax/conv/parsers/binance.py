@@ -834,11 +834,26 @@ def _parse_binance_statements_row(
             buy_rows = [r for r in op_rows if Decimal(r.row_dict["Change"]) > 0]
             sell_rows = [r for r in op_rows if Decimal(r.row_dict["Change"]) < 0]
             if sell_rows:
-                # Deux jambes exportées (débit fiat + crédit crypto) → Trade normal.
-                # ⚠ présuppose une jambe débit FIAT (EUR) ; un débit stablecoin (USDT/USDC)
-                # basculerait en sursis (SWAP) en aval au lieu d'une acquisition onéreuse —
-                # à surveiller si le format d'export Binance évolue (cf. ADR 0013).
-                _make_trade(op_rows)
+                # Cas DEUX jambes (débit + crédit exportés) : JAMAIS rencontré sur les données
+                # réelles (Binance n'exporte que la jambe crypto d'un "Buy Crypto With Fiat").
+                # On NE DEVINE PAS son traitement : `_make_trade` produirait un Trade dont la
+                # qualification aval dépend de la nature de la jambe débit — un débit EUR donnerait
+                # une acquisition onéreuse (CASH_IN, correct), mais un débit stablecoin (USDT/USDC)
+                # basculerait SILENCIEUSEMENT en sursis (SWAP) au lieu d'une acquisition. C'est le
+                # seul chemin de ce handler qui ne fail-loud pas. Plutôt que de coder une logique
+                # pour un format hypothétique (le CLAUDE.md proscrit de traiter un cas que les
+                # données n'exercent pas), on LÈVE : le jour où ce format apparaît réellement, il
+                # faudra regarder la vraie donnée et câbler explicitement la jambe débit (EUR →
+                # laisser en Trade/CASH_IN ; stablecoin → override fiat_buy). Cf. ADR 0013/0028.
+                sell_row = sell_rows[0]
+                raise RuntimeError(
+                    f"'Buy Crypto With Fiat' à DEUX jambes non rencontré à "
+                    f"{sell_row.row_dict['UTC_Time']} (débit {sell_row.row_dict['Change']} "
+                    f"{sell_row.row_dict['Coin']}) : format non prévu. La qualification dépend de "
+                    f"la nature de la jambe débit (EUR = acquisition onéreuse ; stablecoin = "
+                    f"basculerait en sursis SWAP) → à câbler explicitement au vu de la donnée "
+                    f"réelle, jamais deviné. Cf. ADR 0013/0028."
+                )
             elif buy_rows:
                 # Achat fiat mono-jambe : Binance n'exporte PAS le débit EUR → le prix
                 # d'acquisition RÉEL (coût effectivement décaissé) est MANQUANT. On NE DEVINE
