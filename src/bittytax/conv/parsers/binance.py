@@ -478,10 +478,31 @@ def parse_binance_statements(
     tx_times: Dict[datetime, List["DataRow"]] = {}
 
     for dr in data_rows:
-        # Binance statement exports use an ambiguous YY-MM-DD UTC_Time (e.g. "25-01-19").
-        # dateutil defaults to month/day-first and misreads it (25 -> day, 19 -> year 2019),
-        # which corrupts both the dates and the chronological ordering. Force year-first.
-        dr.timestamp = DataParser.parse_timestamp(dr.row_dict["UTC_Time"], yearfirst=True)
+        # Binance statement exports use a strict, homogeneous UTC_Time format: "YY-MM-DD HH:MM:SS"
+        # (e.g. "25-01-19 15:38:09"). Parse it EXPLICITLY with strptime rather than through
+        # dateutil's heuristics: yearfirst=True only pins the LEADING token as the year — the
+        # remaining MM-DD pair still relied on dateutil's month-first DEFAULT to disambiguate.
+        # That default happens to be correct for this stable format, but it is an *implicit*
+        # contract: a border value (day <= 12) could silently invert month and day, corrupting
+        # the date and thus the chronological order -> wrong weighted-average cost (pta) -> wrong
+        # capital gain. A fixed format string removes the ambiguity at the source. We fail loud on
+        # any drift from the expected format instead of falling back to a silent (mis)parse.
+        # Cf. ADR 0005 (year-first fix) and the "block rather than emit a wrong figure" principle.
+        raw = dr.row_dict["UTC_Time"]
+        try:
+            naive = datetime.strptime(raw, "%y-%m-%d %H:%M:%S")
+        except ValueError as e:
+            raise RuntimeError(
+                f"Horodatage Binance Statements au format inattendu : {raw!r} "
+                f"(attendu 'YY-MM-DD HH:MM:SS', ex. '25-01-19 15:38:09'). Le format d'export a "
+                f"peut-être changé — le parser dépend de ce format EXACT pour désambiguïser "
+                f"MM-DD (mois vs jour) et fixer l'ordre chronologique (→ pta/PV). À câbler "
+                f"explicitement au vu du nouveau format, jamais deviné. Cf. ADR 0005."
+            ) from e
+        # Exports horodatés en UTC (nom de fichier "(UTC0)", cf. ADR 0019). On reformate en
+        # ISO non ambigu et on repasse par parse_timestamp pour conserver l'UNIQUE point de
+        # normalisation de fuseau (datetime naïf -> tagué UTC) déjà utilisé partout.
+        dr.timestamp = DataParser.parse_timestamp(naive.strftime("%Y-%m-%d %H:%M:%S"))
         if dr.timestamp in tx_times:
             tx_times[dr.timestamp].append(dr)
         else:
