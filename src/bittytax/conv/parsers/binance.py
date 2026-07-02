@@ -777,24 +777,34 @@ def _parse_binance_statements_row(
             buy_rows = [r for r in op_rows if Decimal(r.row_dict["Change"]) > 0]
             sell_rows = [r for r in op_rows if Decimal(r.row_dict["Change"]) < 0]
             if sell_rows:
+                # Deux jambes exportées (débit fiat + crédit crypto) → Trade normal.
+                # ⚠ présuppose une jambe débit FIAT (EUR) ; un débit stablecoin (USDT/USDC)
+                # basculerait en sursis (SWAP) en aval au lieu d'une acquisition onéreuse —
+                # à surveiller si le format d'export Binance évolue (cf. ADR 0013).
                 _make_trade(op_rows)
             elif buy_rows:
-                # Binance n'exporte pas le débit fiat de "Buy Crypto With Fiat" — il n'y a que la
-                # jambe crypto. On l'enregistre comme acquisition valorisée au prix de marché du
-                # jour (Gift-Received) plutôt qu'en Deposit (transfert à coût nul, qui
-                # sous-estimerait le prix d'acquisition et polluerait le contrôle de transferts).
-                # Un "Trade" mono-jambe est refusé par BittyTax (jambe de vente manquante) ;
-                # Gift-Received entre dans le prix d'acquisition sans être imposé comme revenu.
+                # Achat fiat mono-jambe : Binance n'exporte PAS le débit EUR → le prix
+                # d'acquisition RÉEL (coût effectivement décaissé) est MANQUANT. On NE DEVINE
+                # PAS : ni valeur-marché via Gift-Received (qualification "gratuit" d'un achat
+                # payé, fiscalement fausse — la valeur de marché est réservée au titre gratuit,
+                # CGI 150 VH bis III-B 2e al. ; un achat onéreux se valorise au prix acquitté,
+                # III-B 1er al. + BOI-RPPM-PVBMC-30-20 §70), ni Deposit à coût nul (sous-estime
+                # le pta → PV sur-déclarée). Un achat fiat est une acquisition à titre ONÉREUX
+                # au coût réel justifié par le relevé (ADR 0013) : elle DOIT être fournie via
+                # binance_overrides.csv en Trade EUR→crypto (tag `fiat_buy`), skippée en tête de
+                # _parse_binance_statements_row AVANT d'arriver ici. Sans override, la donnée
+                # nécessaire est absente → on LÈVE plutôt que produire un pta faux en silence
+                # (principe "bloquer plutôt que produire faux", cf. ADR 0013/0024/0028).
                 buy_row = buy_rows[0]
-                buy_row.t_record = TransactionOutRecord(
-                    TrType.GIFT_RECEIVED,
-                    buy_row.timestamp,
-                    buy_quantity=Decimal(buy_row.row_dict["Change"]),
-                    buy_asset=buy_row.row_dict["Coin"],
-                    wallet=WALLET,
-                    note="Achat fiat Binance, jambe EUR non exportee - acquisition au prix marche",
+                raise RuntimeError(
+                    f"'Buy Crypto With Fiat' sans override à {buy_row.row_dict['UTC_Time']} "
+                    f"({buy_row.row_dict['Change']} {buy_row.row_dict['Coin']}) : Binance "
+                    f"n'exporte pas la jambe EUR, le coût d'acquisition réel est manquant. "
+                    f"Ajouter une ligne 'fiat_buy' (Trade EUR->crypto au coût réel justifié par "
+                    f"le relevé) dans binance_overrides.csv, clé Raw Data "
+                    f"{buy_row.row_dict['UTC_Time']}|{buy_row.row_dict['Coin']}|"
+                    f"{buy_row.row_dict['Change']} — cf. ADR 0013."
                 )
-                buy_row.parsed = True
         else:
             # Skip duplicate operations
             return
