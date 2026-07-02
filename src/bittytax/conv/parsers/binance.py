@@ -51,12 +51,27 @@ def _load_withdraw_history_fees() -> Dict[Tuple[str, Decimal], Decimal]:
     if not path or not os.path.exists(path):
         return fees
     with open(path, newline="", encoding="utf-8-sig") as f:
-        for row in csv.DictReader(f):
+        for line_no, row in enumerate(csv.DictReader(f), start=2):
             coin = (row.get("Coin") or "").strip()
             amount = (row.get("Amount") or "").strip()
             fee = (row.get("Fee") or "").strip()
             if coin and amount and fee:
-                fees[(coin, Decimal(amount) + Decimal(fee))] = Decimal(fee)
+                key = (coin, Decimal(amount) + Decimal(fee))
+                fee_dec = Decimal(fee)
+                # Garde d'unicité (fail-loud, cf. ADR 0008) : la clé (Coin, Amount+Fee) = (Coin,
+                # |Change|) est l'identifiant du retrait ; elle DOIT être unique. Un écrasement
+                # "last-wins" silencieux appliquerait un mauvais frais réseau au retrait du
+                # statement → sell_quantity faux → solde/valeur_globale (III-C) faussés. On lève
+                # sur une clé dupliquée à valeur DIVERGENTE (un doublon à frais identique est inerte,
+                # toléré). Même esprit que le garde "Raw Data vide" d'_load_binance_override_keys.
+                if key in fees and fees[key] != fee_dec:
+                    raise RuntimeError(
+                        f"{path}: ligne {line_no}: clé de retrait dupliquée à frais divergent "
+                        f"(Coin={coin}, Amount+Fee={key[1]}) : frais {fees[key]} puis {fee_dec}. "
+                        f"La clé (Coin, |Change|) doit être unique — un frais réseau erroné "
+                        f"fausserait le solde. Vérifier l'export Withdrawal History."
+                    )
+                fees[key] = fee_dec
     return fees
 
 
@@ -75,12 +90,24 @@ def _load_gas_hors_perimetre() -> Dict[Tuple[str, Decimal], Decimal]:
     if not path or not os.path.exists(path):
         return gas
     with open(path, newline="", encoding="utf-8-sig") as f:
-        for row in csv.DictReader(f):
+        for line_no, row in enumerate(csv.DictReader(f), start=2):
             coin = (row.get("Coin") or "").strip()
             change = (row.get("Change") or "").strip()
             extra = (row.get("GasExtra") or "").strip()
             if coin and change and extra:
-                gas[(coin, abs(Decimal(change)))] = Decimal(extra)
+                key = (coin, abs(Decimal(change)))
+                extra_dec = Decimal(extra)
+                # Garde d'unicité (fail-loud, cf. ADR 0010) : (Coin, |Change|) identifie le retrait
+                # sur lequel porter le gas additionnel. Un écrasement "last-wins" silencieux
+                # appliquerait un mauvais gas → sell_quantity faux → solde/valeur_globale faussés.
+                # On lève sur clé dupliquée à valeur divergente (doublon identique toléré).
+                if key in gas and gas[key] != extra_dec:
+                    raise RuntimeError(
+                        f"{path}: ligne {line_no}: clé de gas dupliquée à valeur divergente "
+                        f"(Coin={coin}, |Change|={key[1]}) : {gas[key]} puis {extra_dec}. "
+                        f"La clé (Coin, |Change|) doit être unique. Vérifier le CSV de gas."
+                    )
+                gas[key] = extra_dec
     return gas
 
 
@@ -459,6 +486,36 @@ def parse_binance_statements(
             tx_times[dr.timestamp].append(dr)
         else:
             tx_times[dr.timestamp] = [dr]
+
+    # Garde de CARDINALITÉ des overrides (fail-loud, cf. ADR 0007) : chaque clé d'override
+    # (UTC_Time|Coin|Change, colonne Raw Data de binance_overrides.csv) DOIT matcher EXACTEMENT
+    # UNE ligne du statement. La clé composite n'est pas un identifiant garanti unique (des lignes
+    # distinctes peuvent partager UTC_Time|Coin|Change), et un override peut viser une ligne
+    # absente (typo, mauvais format de date YY-MM-DD vs YYYY-MM-DD). Deux dérives silencieuses :
+    #   - 0 match  → la ligne d'origine n'est PAS skippée → elle coexiste avec la ligne de
+    #                remplacement (double-import → holding / valeur_globale III-C faussés) ;
+    #   - ≥2 match → le skip efface PLUSIEURS lignes légitimes (sous-déclaration).
+    # Seul "exactement 1" correspond à l'intention (requalifier UNE ligne précise). On compte les
+    # matches ici (data_rows complet en main) et on lève sinon — plutôt que de produire un chiffre
+    # faux en silence. Complète le garde "Raw Data vide" d'_load_binance_override_keys (format de
+    # la clé) par un contrôle d'appariement effectif (la clé pointe bien sur 1 ligne unique).
+    if BINANCE_OVERRIDE_KEYS:
+        match_counts: Dict[str, int] = {k: 0 for k in BINANCE_OVERRIDE_KEYS}
+        for dr in data_rows:
+            key = "|".join(
+                (dr.row_dict["UTC_Time"], dr.row_dict["Coin"], dr.row_dict["Change"])
+            )
+            if key in match_counts:
+                match_counts[key] += 1
+        bad = {k: n for k, n in match_counts.items() if n != 1}
+        if bad:
+            details = "; ".join(f"{k!r} → {n} ligne(s)" for k, n in sorted(bad.items()))
+            raise RuntimeError(
+                f"binance_overrides.csv : clé(s) d'override n'appariant pas exactement 1 ligne "
+                f"du statement (0 = ligne absente/typo → double-import ; ≥2 = collision → lignes "
+                f"perdues) : {details}. Corriger la clé Raw Data (UTC_Time|Coin|Change) ou le "
+                f"statement (cf. ADR 0007)."
+            )
 
     for data_row in data_rows:
         if config.debug:

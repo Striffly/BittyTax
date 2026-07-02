@@ -35,8 +35,25 @@ def _load_evm_override_txids() -> Set[str]:
     if not path or not os.path.exists(path):
         return txids
     with open(path, newline="", encoding="utf-8") as f:
-        for row in csv.DictReader(f):
+        for line_no, row in enumerate(csv.DictReader(f), start=2):
             txid = (row.get("Tx ID") or "").strip().lower()
+            row_type = (row.get("Type") or "").strip()
+            # Garde anti-décalage silencieux (fail-loud, symétrique au fix Binance e709b37) : un
+            # `Trade` du CSV EVM requalifie un swap dont SEULE la jambe native est exportée par
+            # l'explorateur — il DOIT porter le `Tx ID` de cette jambe pour l'exclure. Un `Tx ID`
+            # vide sur un `Trade` (typiquement : une virgule non quotée dans `Note` a décalé les
+            # colonnes) désarmerait le skip → la jambe native survivrait en Withdrawal orphelin →
+            # double-comptage + transfers mismatch. On lève plutôt que de l'avaler en silence.
+            # ⚠ NE PAS exiger de `Tx ID` sur les lignes d'AJOUT pur (ex. `reflection` = Gift-Received,
+            # ADR 0014) : elles n'ont pas d'origine à skipper, leur `Tx ID` est vide à dessein.
+            # Le discriminant est donc le Type (`Trade` = skip-row), pas l'absence de clé.
+            if row_type == "Trade" and not txid:
+                raise RuntimeError(
+                    f"{path}: ligne {line_no}: `Trade` d'override sans `Tx ID` "
+                    f"(clé d'exclusion manquante). Cause probable : une virgule non quotée dans "
+                    f"la colonne `Note` a décalé les colonnes. Quoter la cellule `Note`. "
+                    f"Ligne lue : {row}"
+                )
             if txid:
                 txids.add(txid)
     return txids
